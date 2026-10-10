@@ -23,7 +23,7 @@ const {
 } = require('./lib/render');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
 const SITE_URL = 'https://lusitanoplay.up.railway.app';
 
