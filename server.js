@@ -1,0 +1,500 @@
+const express = require('express');
+const path = require('path');
+const { tmdb, img, slugify } = require('./lib/tmdb');
+const { 
+  head, 
+  layout, 
+  posterCard, 
+  genreRow, 
+  trailerBlock, 
+  castGrid, 
+  escapeHtml, 
+  movieJsonLd, 
+  tvJsonLd, 
+  sideBannerAd, 
+  nativeBannerAd, 
+  banner300x250Ad,
+  banner160x600Ad,
+  banner320x50Ad,
+  similarSection, 
+  DEFAULT_TITLE, 
+  DEFAULT_DESC, 
+  SITE_NAME 
+} = require('./lib/render');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+const SITE_URL = 'https://lusitanoplay.up.railway.app';
+
+app.use(express.static(path.join(__dirname, 'public')));
+
+const ROWS = {
+  movie: [
+    { key: '01', title: 'Filmes em Alta', path: '/trending/movie/week' },
+    { key: '02', title: 'Filmes Populares', path: '/movie/popular' },
+    { key: '03', title: 'Filmes Bem Avaliados', path: '/movie/top_rated' },
+    { key: '04', title: 'Próximos Lançamentos', path: '/movie/upcoming' },
+  ],
+  tv: [
+    { key: '01', title: 'Séries em Alta', path: '/trending/tv/week' },
+    { key: '02', title: 'Séries Populares', path: '/tv/popular' },
+    { key: '03', title: 'Séries Bem Avaliadas', path: '/tv/top_rated' },
+    { key: '04', title: 'Séries no Air', path: '/tv/on_the_air' },
+  ],
+};
+
+function seoTitle(title, year) {
+  const y = year || '2026';
+  return `[ASSISTIR!!] ~  ${title} (${y}) Online Dublado e Legendado Full HD 1080p`;
+}
+
+function seoDescription(title, year, genreNames) {
+  const yearPart = year ? `${year}, ` : '';
+  const genrePart = genreNames ? `gênero ${genreNames}, ` : '';
+  return `Sinopse, elenco, avaliação e trailer oficial de ${title}. ${genrePart}${yearPart}tudo o que você precisa saber sobre este título.`;
+}
+
+// ---------- HOME (/, /movie, /tv) ----------
+async function renderHome(req, res, tab) {
+  try {
+    const heroData = await tmdb(tab === 'movie' ? '/trending/movie/week' : '/trending/tv/week');
+    const hero = heroData.results[0];
+    const heroTitle = hero ? (hero.title || hero.name) : SITE_NAME;
+    const heroOverview = hero ? (hero.overview || '') : '';
+
+    const rowsHtml = [];
+    for (const def of ROWS[tab]) {
+      const data = await tmdb(def.path);
+      const cards = data.results.slice(0, 12).map(item => posterCard(item, tab)).join('');
+      rowsHtml.push(`
+        <section class="row">
+          <div class="row-head"><span class="row-num">${def.key}</span><h2>${def.title}</h2></div>
+          <div class="grid">${cards}</div>
+        </section>
+      `);
+    }
+
+    const heroHtml = hero ? `
+      <div id="hero">
+        <div class="hero-bg" style="background-image:url('${img(hero.backdrop_path, 'original')}')"></div>
+        <div class="hero-fade"></div>
+        <div class="hero-content">
+          <div class="hero-eyebrow">Destaque da Semana</div>
+          <div class="hero-title">${escapeHtml(heroTitle)}</div>
+          <div class="hero-overview">${escapeHtml(heroOverview).slice(0, 180)}${heroOverview.length > 180 ? '…' : ''}</div>
+          <a class="hero-btn" href="/${tab}/${hero.id}/${encodeURIComponent(slugify(heroTitle))}">Ver Mais ▸</a>
+        </div>
+      </div>` : '';
+
+    const bodyHtml = heroHtml + `<div id="rows">${rowsHtml.join('')}</div>`;
+
+    const headHtml = head({
+      title: DEFAULT_TITLE,
+      description: DEFAULT_DESC,
+      url: `${SITE_URL}/${tab}`,
+      image: hero ? img(hero.backdrop_path, 'w780') : null,
+    });
+
+    res.send(layout({ headHtml, bodyHtml, activeTab: tab }));
+  } catch (e) {
+    res.status(500).send(layout({
+      headHtml: head({ title: DEFAULT_TITLE, description: DEFAULT_DESC, url: `${SITE_URL}/${tab}` }),
+      bodyHtml: `<div class="empty">Não foi possível carregar os dados. Tente novamente mais tarde.</div>`,
+      activeTab: tab,
+    }));
+  }
+}
+
+app.get('/', (req, res) => renderHome(req, res, 'movie'));
+app.get('/movie', (req, res) => renderHome(req, res, 'movie'));
+app.get('/tv', (req, res) => renderHome(req, res, 'tv'));
+
+// ---------- DETAIL FILME: /movie/:id/:slug? ----------
+app.get('/movie/:id/:slug?', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const data = await tmdb(`/movie/${id}`, {
+      append_to_response: 'credits,videos,similar'
+    });
+    
+    const correctSlug = slugify(data.title);
+    if (req.params.slug !== correctSlug) {
+      return res.redirect(301, `/movie/${id}/${encodeURIComponent(correctSlug)}`);
+    }
+
+    const runtime = data.runtime ? `${Math.floor(data.runtime / 60)}h ${data.runtime % 60}min` : 'N/D';
+    
+    const credits = data.credits || {};
+    const videos = data.videos || {};
+    const similar = data.similar || {};
+
+    const bodyHtml = `
+      <a class="back-btn" href="/movie">← Voltar</a>
+      <div class="detail-hero">
+        <div class="hero-bg" style="background-image:url('${img(data.backdrop_path, 'original')}')"></div>
+        <div class="hero-fade"></div>
+        <div class="detail-poster"><img src="${img(data.poster_path)}" alt="Pôster de ${escapeHtml(data.title)}"></div>
+        <div class="detail-info">
+          <div class="detail-eyebrow">Filme</div>
+          <h1 class="detail-title">${escapeHtml(data.title)}</h1>
+          <div class="detail-orig">${escapeHtml(data.original_title)} · ${(data.release_date || '').slice(0, 4) || '2026'}</div>
+          ${data.tagline ? `<div class="tagline">"${escapeHtml(data.tagline)}"</div>` : ''}
+          <div class="detail-meta">
+            <span class="m-item star">★ ${data.vote_average ? data.vote_average.toFixed(1) : '-'} / 10</span>
+            <span class="m-item">${runtime}</span>
+            <span class="m-item">${escapeHtml(data.status || '')}</span>
+          </div>
+          ${genreRow(data.genres)}
+          <a href="/watch/${id}" class="watch-btn" style="display:inline-block; margin-top:15px; padding:10px 20px; background:#e50914; color:#fff; text-decoration:none; border-radius:4px; font-weight:bold;">Assistir Agora</a>
+        </div>
+      </div>
+      <div class="section-block"><h3>Sinopse</h3><div class="bio-text">${escapeHtml(data.overview) || 'Nenhuma sinopse disponível.'}</div></div>
+      ${nativeBannerAd()}
+      <div class="section-block"><h3>Trailer</h3>${trailerBlock(videos)}</div>
+      <div class="section-block"><h3>Elenco</h3>${castGrid(credits)}</div>
+      ${typeof similarSection === 'function' ? similarSection(similar) : ''}
+      ${sideBannerAd()}
+      ${movieJsonLd(data, `${SITE_URL}/movie/${id}/${encodeURIComponent(correctSlug)}`)}
+    `;
+
+    const movieYear = (data.release_date || '').slice(0, 4) || '2026';
+    const headHtml = head({
+      title: seoTitle(data.title, movieYear),
+      description: seoDescription(data.title, movieYear, (data.genres || []).map(g => g.name).join(', ')),
+      url: `${SITE_URL}/movie/${id}/${encodeURIComponent(correctSlug)}`,
+      image: img(data.backdrop_path || data.poster_path, 'w780'),
+      type: 'video.movie',
+    });
+
+    res.send(layout({ headHtml, bodyHtml, activeTab: 'movie' }));
+  } catch (e) {
+    res.status(404).send(layout({
+      headHtml: head({
+        title: 'Filme não encontrado',
+        description: DEFAULT_DESC,
+        url: `${SITE_URL}/movie/${id}`,
+        robots: 'noindex, nofollow',
+      }),
+      bodyHtml: `<a class="back-btn" href="/movie">← Voltar</a><div class="empty">Este filme não foi encontrado.</div>`,
+      activeTab: 'movie',
+    }));
+  }
+});
+
+// ---------- DETAIL SERIE: /tv/:id/:slug? ----------
+app.get('/tv/:id/:slug?', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [data, credits, videos] = await Promise.all([
+      tmdb(`/tv/${id}`),
+      tmdb(`/tv/${id}/credits`),
+      tmdb(`/tv/${id}/videos`),
+    ]);
+    const correctSlug = slugify(data.name);
+    if (req.params.slug !== correctSlug) {
+      return res.redirect(301, `/tv/${id}/${encodeURIComponent(correctSlug)}`);
+    }
+
+    const seasons = (data.seasons || []).filter(s => s.season_number >= 0);
+    const seasonsHtml = seasons.map(s => `
+      <div class="season-item" data-season="${s.season_number}" data-tv="${id}">
+        <div class="season-head">
+          <img src="${img(s.poster_path, 'w92')}" alt="${escapeHtml(s.name)}">
+          <div>
+            <div class="s-title">${escapeHtml(s.name)}</div>
+            <div class="s-meta">${s.episode_count} episódios · ${(s.air_date || '').slice(0, 4) || '2026'}</div>
+          </div>
+          <div class="chev">▶</div>
+        </div>
+        <div class="episode-panel"></div>
+      </div>
+    `).join('');
+
+    const bodyHtml = `
+      <a class="back-btn" href="/tv">← Voltar</a>
+      <div class="detail-hero">
+        <div class="hero-bg" style="background-image:url('${img(data.backdrop_path, 'original')}')"></div>
+        <div class="hero-fade"></div>
+        <div class="detail-poster"><img src="${img(data.poster_path)}" alt="Pôster de ${escapeHtml(data.name)}"></div>
+        <div class="detail-info">
+          <div class="detail-eyebrow">Série</div>
+          <h1 class="detail-title">${escapeHtml(data.name)}</h1>
+          <div class="detail-orig">${escapeHtml(data.original_name)} · ${(data.first_air_date || '').slice(0, 4) || '2026'}</div>
+          ${data.tagline ? `<div class="tagline">"${escapeHtml(data.tagline)}"</div>` : ''}
+          <div class="detail-meta">
+            <span class="m-item star">★ ${data.vote_average ? data.vote_average.toFixed(1) : '-'} / 10</span>
+            <span class="m-item">${data.number_of_seasons || '-'} temporadas</span>
+            <span class="m-item">${data.number_of_episodes || '-'} episódios</span>
+            <span class="m-item">${escapeHtml(data.status || '')}</span>
+          </div>
+          ${genreRow(data.genres)}
+          <a href="/watch/${id}" class="watch-btn" style="display:inline-block; margin-top:15px; padding:10px 20px; background:#e50914; color:#fff; text-decoration:none; border-radius:4px; font-weight:bold;">Assistir Agora</a>
+        </div>
+      </div>
+      <div class="section-block"><h3>Sinopse</h3><div class="bio-text">${escapeHtml(data.overview) || 'Nenhuma sinopse disponível.'}</div></div>
+      ${nativeBannerAd()}
+      <div class="section-block"><h3>Trailer</h3>${trailerBlock(videos)}</div>
+      <div class="section-block"><h3>Elenco</h3>${castGrid(credits)}</div>
+      <div class="section-block">
+        <h3>Temporadas e Episódios</h3>
+        <div class="season-list" id="season-list">${seasonsHtml}</div>
+      </div>
+      ${sideBannerAd()}
+      ${tvJsonLd(data, `${SITE_URL}/tv/${id}/${encodeURIComponent(correctSlug)}`)}
+    `;
+
+    const tvYear = (data.first_air_date || '').slice(0, 4) || '2026';
+    const headHtml = head({
+      title: seoTitle(data.name, tvYear),
+      description: seoDescription(data.name, tvYear, (data.genres || []).map(g => g.name).join(', ')),
+      url: `${SITE_URL}/tv/${id}/${encodeURIComponent(correctSlug)}`,
+      image: img(data.backdrop_path || data.poster_path, 'w780'),
+      type: 'video.tv_show',
+    });
+
+    res.send(layout({ headHtml, bodyHtml, activeTab: 'tv' }));
+  } catch (e) {
+    res.status(404).send(layout({
+      headHtml: head({
+        title: 'Série não encontrada',
+        description: DEFAULT_DESC,
+        url: `${SITE_URL}/tv/${id}`,
+        robots: 'noindex, nofollow',
+      }),
+      bodyHtml: `<a class="back-btn" href="/tv">← Voltar</a><div class="empty">Esta série não foi encontrada.</div>`,
+      activeTab: 'tv',
+    }));
+  }
+});
+
+// ---------- DETAIL PERSON: /person/:id/:slug? ----------
+app.get('/person/:id/:slug?', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [person, credits] = await Promise.all([
+      tmdb(`/person/${id}`),
+      tmdb(`/person/${id}/combined_credits`)
+    ]);
+
+    const correctSlug = slugify(person.name);
+    if (req.params.slug !== correctSlug) {
+      return res.redirect(301, `/person/${id}/${encodeURIComponent(correctSlug)}`);
+    }
+
+    const knownFor = (credits.cast || [])
+      .sort((a, b) => (b.vote_count || 0) - (a.vote_count || 0))
+      .slice(0, 12);
+    
+    const cards = knownFor.map(item => posterCard(item, item.media_type || 'movie')).join('');
+
+    const bodyHtml = `
+      <div style="padding: 20px; color: #fff; max-width: 1200px; margin: 0 auto;">
+        <a class="back-btn" href="javascript:history.back()">← Voltar</a>
+        <div style="display: flex; gap: 30px; flex-wrap: wrap; margin-top: 20px;">
+          <div style="flex: 0 0 250px;">
+            <img src="${img(person.profile_path, 'h632')}" alt="${escapeHtml(person.name)}" style="width: 100%; border-radius: 8px; object-fit: cover;">
+          </div>
+          <div style="flex: 1; min-width: 280px;">
+            <h1 style="margin-top: 0; font-size: 2.2rem;">${escapeHtml(person.name)}</h1>
+            <p><strong>Nascido(a) em:</strong> ${person.birthday || 'N/D'} ${person.place_of_birth ? `(${person.place_of_birth})` : ''}</p>
+            <h3 style="margin-top: 20px;">Biografia</h3>
+            <div style="line-height: 1.6; color: #ccc; max-height: 250px; overflow-y: auto;">${escapeHtml(person.biography) || 'Nenhuma biografia disponível.'}</div>
+          </div>
+        </div>
+        <div style="margin-top: 40px;">
+          <h3>Conhecido(a) por</h3>
+          <div class="grid" style="margin-top: 15px;">${cards}</div>
+        </div>
+      </div>
+    `;
+
+    const headHtml = head({
+      title: `${person.name}`,
+      description: `Informações e filmografia de ${person.name}`,
+      url: `${SITE_URL}/person/${id}/${encodeURIComponent(correctSlug)}`,
+      image: img(person.profile_path, 'w780'),
+    });
+
+    res.send(layout({ headHtml, bodyHtml, activeTab: 'movie' }));
+  } catch (e) {
+    res.status(404).send(layout({
+      headHtml: head({ title: 'Ator/Atriz não encontrado(a)', description: '', url: `${SITE_URL}/person/${id}` }),
+      bodyHtml: `<div class="empty" style="padding: 40px; text-align: center; color: #fff;">Pessoa não encontrada.</div>`,
+      activeTab: 'movie',
+    }));
+  }
+});
+
+// ---------- COUNTDOWN WATCH PAGE ----------
+app.get('/watch/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    let data;
+    try {
+      data = await tmdb(`/movie/${id}`);
+    } catch (err) {
+      data = await tmdb(`/tv/${id}`);
+    }
+    const title = data.title || data.name || 'Vídeo';
+    const targetUrl = 'https://moviegate.bolt.host/pt'; 
+
+    const bodyHtml = `
+      <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 80vh; color: #fff; text-align: center; font-family: sans-serif;">
+        <h2>Preparando seu player para: <span style="color: #e50914;">${escapeHtml(title)}</span></h2>
+        <p style="font-size: 1.2rem; margin: 20px 0;">Por favor, aguarde <span id="countdown" style="font-weight: bold; color: #e50914; font-size: 1.5rem;">5</span> segundos...</p>
+        <div style="width: 200px; height: 4px; background: #333; border-radius: 2px; overflow: hidden;">
+          <div id="progress" style="width: 100%; height: 100%; background: #e50914; transition: width 1s linear;"></div>
+        </div>
+      </div>
+      <script>
+        let seconds = 5;
+        const countdownEl = document.getElementById('countdown');
+        const progressEl = document.getElementById('progress');
+        
+        const timer = setInterval(() => {
+          seconds--;
+          countdownEl.textContent = seconds;
+          progressEl.style.width = (seconds / 5 * 100) + '%';
+          
+          if (seconds <= 0) {
+            clearInterval(timer);
+            window.location.href = "${targetUrl}";
+          }
+        }, 1000);
+      </script>
+    `;
+
+    const headHtml = head({
+      title: `Assistir ${title}`,
+      description: `Assistir online ${title}`,
+      url: `${SITE_URL}/watch/${id}`,
+      robots: 'noindex, nofollow',
+    });
+
+    res.send(layout({ headHtml, bodyHtml, activeTab: 'movie' }));
+  } catch (e) {
+    res.redirect('/');
+  }
+});
+
+// ---------- SEARCH PAGE ----------
+app.get('/search', async (req, res) => {
+  const query = req.query.q || '';
+  try {
+    const data = await tmdb('/search/multi', { query });
+    const results = (data.results || []).filter(r => r.media_type === 'movie' || r.media_type === 'tv' || r.media_type === 'person');
+    
+    const cards = results.map(item => {
+      if (item.media_type === 'person') {
+        const pSlug = slugify(item.name);
+        return `
+          <div class="poster-card" onclick="window.location.href='/person/${item.id}/${encodeURIComponent(pSlug)}'" style="cursor:pointer; background:#181818; border-radius:8px; overflow:hidden; text-align:center; padding-bottom:10px;">
+            <img src="${img(item.profile_path, 'w185')}" alt="${escapeHtml(item.name)}" style="width:100%; height:250px; object-fit:cover;">
+            <div style="padding:10px; color:#fff; font-weight:bold; font-size:0.9rem;">${escapeHtml(item.name)}</div>
+            <div style="color:#aaa; font-size:0.8rem;">Ator/Atriz</div>
+          </div>
+        `;
+      }
+      return posterCard(item, item.media_type);
+    }).join('');
+    
+    const bodyHtml = `
+      <div class="section-block" style="padding: 20px; color: #fff;">
+        <h2>Resultados da pesquisa para: "${escapeHtml(query)}"</h2>
+        ${cards ? `<div class="grid" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:15px; margin-top:20px;">${cards}</div>` : '<div class="empty" style="padding: 40px; text-align: center;">Nenhum resultado encontrado.</div>'}
+      </div>
+    `;
+
+    const headHtml = head({
+      title: `Pesquisa: ${query}`,
+      description: `Resultados da busca por ${query}`,
+      url: `${SITE_URL}/search?q=${encodeURIComponent(query)}`,
+      robots: 'noindex, nofollow',
+    });
+
+    res.send(layout({ headHtml, bodyHtml, activeTab: 'movie' }));
+  } catch (e) {
+    res.status(500).send(layout({
+      headHtml: head({ title: 'Erro', description: '', url: `${SITE_URL}/search` }),
+      bodyHtml: `<div class="empty">Ocorreu um erro na pesquisa.</div>`,
+      activeTab: 'movie',
+    }));
+  }
+});
+
+// ---------- API PROXY ----------
+app.get('/api/search', async (req, res) => {
+  try {
+    const q = req.query.q || '';
+    if (!q.trim()) return res.json({ results: [] });
+    const data = await tmdb('/search/multi', { query: q });
+    const results = data.results
+      .filter(r => r.media_type === 'movie' || r.media_type === 'tv' || r.media_type === 'person')
+      .slice(0, 8)
+      .map(r => ({
+        id: r.id,
+        type: r.media_type,
+        title: r.title || r.name,
+        year: (r.release_date || r.first_air_date || '').slice(0, 4),
+        poster: img(r.poster_path || r.profile_path, 'w92'),
+        slug: slugify(r.title || r.name),
+      }));
+    res.json({ results });
+  } catch (e) {
+    res.status(500).json({ results: [], error: true });
+  }
+});
+
+app.get('/api/season/:tvId/:seasonNumber', async (req, res) => {
+  try {
+    const { tvId, seasonNumber } = req.params;
+    const data = await tmdb(`/tv/${tvId}/season/${seasonNumber}`);
+    const episodes = (data.episodes || []).map(ep => ({
+      number: ep.episode_number,
+      name: ep.name,
+      airDate: ep.air_date,
+      rating: ep.vote_average ? ep.vote_average.toFixed(1) : '-',
+      overview: ep.overview,
+      still: img(ep.still_path, 'w300'),
+    }));
+    res.json({ episodes });
+  } catch (e) {
+    res.status(500).json({ episodes: [], error: true });
+  }
+});
+
+// ---------- SITEMAP & ROBOTS ----------
+app.get('/sitemap.xml', async (req, res) => {
+  try {
+    const [mp, mt, tp, tt] = await Promise.all([
+      tmdb('/movie/popular'),
+      tmdb('/movie/top_rated'),
+      tmdb('/tv/popular'),
+      tmdb('/tv/top_rated'),
+    ]);
+    const today = new Date().toISOString().slice(0, 10);
+    const urls = [
+      { loc: `${SITE_URL}/movie`, priority: '1.0', changefreq: 'daily' },
+      { loc: `${SITE_URL}/tv`, priority: '1.0', changefreq: 'daily' },
+      ...[...mp.results, ...mt.results].map(m => ({ loc: `${SITE_URL}/movie/${m.id}/${encodeURIComponent(slugify(m.title))}`, priority: '0.7', changefreq: 'weekly' })),
+      ...[...tp.results, ...tt.results].map(t => ({ loc: `${SITE_URL}/tv/${t.id}/${encodeURIComponent(slugify(t.name))}`, priority: '0.7', changefreq: 'weekly' })),
+    ];
+    const uniq = [...new Map(urls.map(u => [u.loc, u])).values()];
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${uniq.map(u => `  <url><loc>${u.loc}</loc><lastmod>${today}</lastmod><changefreq>${u.changefreq}</changefreq><priority>${u.priority}</priority></url>`).join('\n')}
+</urlset>`;
+    res.type('application/xml').send(xml);
+  } catch (e) {
+    res.status(500).send('');
+  }
+});
+
+app.get('/robots.txt', (req, res) => {
+  res.type('text/plain').send(`User-agent: *\nAllow: /\nSitemap: ${SITE_URL}/sitemap.xml\n`);
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
+});
